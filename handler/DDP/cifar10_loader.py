@@ -83,44 +83,59 @@ def get_DDP_loader(test_batch, train_batch, root=base_dir, valid_size=0, valid_b
     You need to fill the missing parts.
     '''
 
-    raise NotImplementedError()
-    return None, None, None
-
     """SCAFFOLD"""
 
-    # world_size = "Fill it"
+    world_size = dist.get_world_size()
     
-    # train_dataset = torchvision.datasets.CIFAR10(
-    #         root=root, train=True,
-    #         download=download, transform=transform_train)
+    train_dataset = torchvision.datasets.CIFAR10(
+            root=root, train=True,
+            download=download, transform=transform_train)
     
-    # if valid_size > 0:
-    #     train_dataset, valid_dataset = \
-    #         torch.utils.data.random_split(train_dataset, 
-    #                                       [50000-valid_size, valid_size],
-    #                                       generator=torch.Generator().manual_seed(random_seed))
-    #     valid_dataset.transforms = transform_test
+    if valid_size > 0:
+        train_dataset, valid_dataset = \
+            torch.utils.data.random_split(train_dataset, 
+                                          [50000-valid_size, valid_size],
+                                          generator=torch.Generator().manual_seed(random_seed))
+        valid_dataset.transforms = transform_test
         
-    # test_dataset = torchvision.datasets.CIFAR10(
-    #         root=root, train=False, 
-    #         download=download, transform=transform_test)
+    test_dataset = torchvision.datasets.CIFAR10(
+            root=root, train=False, 
+            download=download, transform=transform_test)
     
-    # if train_batch > 0:        
-    #     if cutout > 0:
-    #         transform_train.transforms.append(Cutout(cutout))
-    #     "fill it"    
-    # else:
-    #     train_loader = None
+    if train_batch > 0:        
+        if cutout > 0:
+            transform_train.transforms.append(Cutout(cutout))
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size,
+                                   rank=dist.get_rank(), shuffle=shuffle,
+                                   seed=random_seed)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=train_batch // world_size,
+            sampler=train_sampler, shuffle=False,
+            num_workers=num_workers, pin_memory=True)
 
-    # if valid_size > 0:
-    #     assert(valid_batch > 0, "validation set follows the batch size of test set, which is 0")
-    #     "fill it"    
-    # else:
-    #     valid_loader = None    
+    else:
+        train_loader = None
+
+    if valid_size > 0:
+        assert(valid_batch > 0, "validation set follows the batch size of test set, which is 0")
+        valid_sampler = DistributedSampler(valid_dataset, num_replicas=world_size,
+                                   rank=dist.get_rank(), shuffle=shuffle,
+                                   seed=random_seed)
+        valid_loader = torch.utils.data.DataLoader(
+            valid_dataset, batch_size=valid_batch // world_size,
+            sampler=valid_sampler, shuffle=False,
+            num_workers=num_workers, pin_memory=True)
+    else:
+        valid_loader = None    
     
-    # if test_batch > 0:
-    #     "fill it"    
-    # else:
-    #     test_loader = None
+    if test_batch > 0:
+        test_sampler = DistributedSampler(test_dataset, num_replicas=world_size,
+                                  rank=dist.get_rank(), shuffle=False)
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset, batch_size=test_batch // world_size,
+            sampler=test_sampler, shuffle=False,
+            num_workers=num_workers, pin_memory=True)
+    else:
+        test_loader = None
 
-    # return test_loader, train_loader, valid_loader
+    return test_loader, train_loader, valid_loader
