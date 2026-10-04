@@ -90,44 +90,67 @@ class CifarPipeline(Pipeline):
             ])
     '''
 
-    def __init__(self):
-        pass
+    def __init__(self, data_dir, batch_size, is_train, cutout_length,
+                 device_id, shard_id, num_shards, num_workers):
+        super(CifarPipeline, self).__init__(batch_size, num_workers, device_id, seed=12345)
+        self.data_dir = data_dir
+        self.is_train = is_train
+        self.cutout_length = cutout_length
+        self.shard_id = shard_id
+        self.num_shards = num_shards
 
-    """SCAFFOLD"""
-    
-    # def __init__(self, data_dir, batch_size, is_train, cutout_length,
-    #              device_id, shard_id, num_shards, num_workers):
-    #     super(CifarPipeline, self).__init__(batch_size, num_workers, device_id, seed=12345)
-    #     self.data_dir = data_dir
-    #     self.is_train = is_train
-    #     self.cutout_length = cutout_length
-    #     self.shard_id = shard_id
-    #     self.num_shards = num_shards
+    def define_graph(self):
+        images, labels = fn.readers.file(
+            file_root=self.data_dir,
+            random_shuffle=self.is_train,
+            shard_id=self.shard_id,
+            num_shards=self.num_shards,
+            pad_last_batch=True,
+            name="Reader",
+        )
+        images = fn.decoders.image(
+            images, device="mixed", output_type=types.RGB
+        )
 
-    # def define_graph(self):
-    #     images, labels = fn.readers.file(
-    #         name="Reader",
-    #         "fill it"
-    #     )
-    #     images = fn.decoders.image(
-    #         images, device="mixed", output_type=types.RGB
-    #     )
+        if self.is_train:
+            # 1. Padding (pad 4px on each side -> 32x32 becomes 40x40,
+            #    placing the original image at a random position in the
+            #    padded canvas, equivalent to RandomCrop(32, padding=4))
+            images = fn.paste(
+                images,
+                fill_value=0,
+                ratio=1.25,
+                paste_x=fn.random.uniform(range=(0.0, 1.0)),
+                paste_y=fn.random.uniform(range=(0.0, 1.0)),
+            )
+            # 2. Horizontal Flip
+            coin = fn.random.coin_flip(probability=0.5)
+            # 3. Crop, Mirror, Normalize
+            images = fn.crop_mirror_normalize(
+                images,
+                crop=(32, 32),
+                mirror=coin,
+                mean=CIFAR_MEAN,
+                std=CIFAR_STD,
+                output_layout="CHW",
+                dtype=types.FLOAT,
+            )
+            # 4. Cutout
+            if self.cutout_length > 0:
+                images = fn_dali_cutout(images, self.cutout_length)
+        else:
+            # 1. Crop, Normalize
+            images = fn.crop_mirror_normalize(
+                images,
+                crop=(32, 32),
+                mean=CIFAR_MEAN,
+                std=CIFAR_STD,
+                output_layout="CHW",
+                dtype=types.FLOAT,
+            )
 
-    #     if self.is_train:
-    #         # 1. Padding
-    #         "fill it"
-    #         # 2. Horizontal Flip
-    #         "fill it"
-    #         # 3. Crop, Mirror, Normalize
-    #         "fill it"
-    #         # 4. Cutout
-    #         if self.cutout_length > 0:
-    #             "fill it"
-    #     else:
-    #         # 1. Crop, Normalize
-    #         "fill it"
-
-    #     return images, labels
+        labels = labels.gpu()
+        return images, labels
 
 def get_DALI_loader(test_batch, train_batch, root=base_dir, valid_size=0, valid_batch=0,
                cutout=16, num_workers=4, download=True, random_seed=12345, shuffle=True):
@@ -142,43 +165,51 @@ def get_DALI_loader(test_batch, train_batch, root=base_dir, valid_size=0, valid_
     We give you the DALIWrapper class, which is a wrapper of DALIGenericIterator, to maintain the same interface with the original loader.
     '''
 
-    raise NotImplementedError()
-    return None, None, None
-    
-    """SCAFFOLD"""
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    device_id = torch.cuda.current_device()
 
-    # world_size = "fill it"
-    # rank = "fill it"
-    
-    # train_dir = os.path.join(root, "train")
-    # valid_dir = os.path.join(root, "valid")
-    # test_dir = os.path.join(root, "test")
+    train_dir = os.path.join(root, "train")
+    valid_dir = os.path.join(root, "valid")
+    test_dir = os.path.join(root, "test")
 
-    # train_loader, valid_loader, test_loader = None, None, None
+    train_loader, valid_loader, test_loader = None, None, None
 
-    # if train_batch > 0:
-    #     pipe = CifarPipeline("fill it")
-    #     pipe.build()
-    #     dali_iter = DALIGenericIterator(pipe, reader_name="Reader",
-    #     # "fill it"
-    #     )
-    #     train_loader = DALIWrapper(dali_iter)
-        
-    # if valid_size > 0:
-    #     assert valid_batch > 0, "Validation batch size must be > 0"
-    #     pipe = CifarPipeline("fill it")
-    #     pipe.build()
-    #     dali_iter = DALIGenericIterator(pipe, reader_name="Reader",
-    #     # "fill it"
-    #     )
-    #     valid_loader = DALIWrapper(dali_iter)
-    
-    # if test_batch > 0:
-    #     pipe = CifarPipeline("fill it")
-    #     pipe.build()
-    #     dali_iter = DALIGenericIterator(pipe, reader_name="Reader",
-    #     # "fill it"
-    #     )
-    #     test_loader = DALIWrapper(dali_iter)
+    if train_batch > 0:
+        pipe = CifarPipeline(
+            data_dir=train_dir, batch_size=train_batch, is_train=True,
+            cutout_length=cutout, device_id=device_id, shard_id=rank,
+            num_shards=world_size, num_workers=num_workers)
+        pipe.build()
+        dali_iter = DALIGenericIterator(
+            pipe, ["data", "label"], reader_name="Reader",
+            last_batch_policy=LastBatchPolicy.PARTIAL, auto_reset=True,
+        )
+        train_loader = DALIWrapper(dali_iter)
 
-    # return test_loader, train_loader, valid_loader
+    if valid_size > 0:
+        assert valid_batch > 0, "Validation batch size must be > 0"
+        pipe = CifarPipeline(
+            data_dir=valid_dir, batch_size=valid_batch, is_train=False,
+            cutout_length=0, device_id=device_id, shard_id=rank,
+            num_shards=world_size, num_workers=num_workers)
+        pipe.build()
+        dali_iter = DALIGenericIterator(
+            pipe, ["data", "label"], reader_name="Reader",
+            last_batch_policy=LastBatchPolicy.PARTIAL, auto_reset=True,
+        )
+        valid_loader = DALIWrapper(dali_iter)
+
+    if test_batch > 0:
+        pipe = CifarPipeline(
+            data_dir=test_dir, batch_size=test_batch, is_train=False,
+            cutout_length=0, device_id=device_id, shard_id=rank,
+            num_shards=world_size, num_workers=num_workers)
+        pipe.build()
+        dali_iter = DALIGenericIterator(
+            pipe, ["data", "label"], reader_name="Reader",
+            last_batch_policy=LastBatchPolicy.PARTIAL, auto_reset=True,
+        )
+        test_loader = DALIWrapper(dali_iter)
+
+    return test_loader, train_loader, valid_loader
